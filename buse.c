@@ -125,7 +125,14 @@ static int serve_nbd(int sk, const struct buse_operations * aop, void * userdata
   reply.magic = htonl(NBD_REPLY_MAGIC);
   reply.error = htonl(0);
 
-  while ((bytes_read = read(sk, &request, sizeof(request))) > 0) {
+  while (1) {
+    bytes_read = read(sk, &request, sizeof(request));
+    if (bytes_read < 0 && errno == EINTR) continue;
+    if (bytes_read < 0) {
+      warn("failed read from nbd device");
+      return EXIT_FAILURE;
+    }
+
     assert(bytes_read == sizeof(request));
     memcpy(reply.handle, request.handle, sizeof(reply.handle));
     reply.error = htonl(0);
@@ -197,11 +204,9 @@ static int serve_nbd(int sk, const struct buse_operations * aop, void * userdata
       assert(0);
     }
   }
-  if (bytes_read == -1) {
-    warn("error reading userside of nbd socket");
-    return EXIT_FAILURE;
-  }
-  return EXIT_SUCCESS;
+
+  /* we shuldnt be here */
+  return EXIT_FAILURE;
 }
 
 int buse_main(const char* dev_file, const struct buse_operations *aop, void *userdata)
@@ -221,6 +226,10 @@ int buse_main(const char* dev_file, const struct buse_operations *aop, void *use
     return 1;
   }
 
+  /* Not sure if it's a good idea.
+   * Maybe before that we should check if this device is unused? */
+  if (ioctl(nbd, NBD_CLEAR_SOCK) == -1) warn(NULL);
+
   if (aop->blksize) {
     err = ioctl(nbd, NBD_SET_BLKSIZE, aop->blksize);
     assert(err != -1);
@@ -233,9 +242,6 @@ int buse_main(const char* dev_file, const struct buse_operations *aop, void *use
     err = ioctl(nbd, NBD_SET_SIZE_BLOCKS, aop->size_blocks);
     assert(err != -1);
   }
-
-  err = ioctl(nbd, NBD_CLEAR_SOCK);
-  assert(err != -1);
 
   pid_t pid = fork();
   if (pid == 0) {
@@ -280,14 +286,6 @@ int buse_main(const char* dev_file, const struct buse_operations *aop, void *use
       }
     }
 
-    if (
-      ioctl(nbd, NBD_CLEAR_QUE) == -1 ||
-      ioctl(nbd, NBD_CLEAR_SOCK) == -1
-    ) {
-      warn("failed to perform nbd cleanup actions");
-      exit(EXIT_FAILURE);
-    }
-
     exit(0);
   }
 
@@ -296,7 +294,7 @@ int buse_main(const char* dev_file, const struct buse_operations *aop, void *use
   nbd_dev_to_disconnect = nbd;
   struct sigaction act;
   act.sa_handler = disconnect_nbd;
-  act.sa_flags = SA_RESTART;
+  act.sa_flags = 0;
   if (
     sigemptyset(&act.sa_mask) != 0 ||
     sigaddset(&act.sa_mask, SIGINT) != 0 ||
@@ -329,6 +327,13 @@ int buse_main(const char* dev_file, const struct buse_operations *aop, void *use
   if (WEXITSTATUS(status) != 0) {
     return WEXITSTATUS(status);
   }
+
+  /*if ( // this seems to cause dmesg error messages
+      ioctl(nbd, NBD_CLEAR_SOCK) == -1
+    ) {
+      fprintf(stderr, "failed to perform nbd cleanup actions: %s\n", strerror(errno));
+      exit(EXIT_FAILURE);
+    }*/
 
   return EXIT_SUCCESS;
 }
